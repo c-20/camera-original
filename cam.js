@@ -47,14 +47,13 @@ function clearcamvas() {
 var asyncfail = false;
 var mediafail = false;
 var cameraon = false;
-var framefpsmax = 5.0;
+var framefpsmax = 20; // 20fps limiter !!
 var framefpsmaxms = 1000 / framefpsmax;
 
+var averagefps = framefpsmax;
+var fpsrange = 5; // sample 5 frames
 
-
-
-
-
+var prevtime = Date.now();
 
 function framebuttonclick() {
   var errortarget = (cimage) ? cstatus : document.body;
@@ -132,18 +131,26 @@ console.log('camsize: ' + camwidth + 'x' + camheight);
 
 //console.log('imagecodelength: ' + imagecodelength);
 
-    var datasizepercent = Math.trunc(imagecodelength / imagedatalength * 10000) / 100;
+    var datasizepercent = Math.floor(imagecodelength / imagedatalength * 1000) / 10;
     consoleitemvalue("Compressed Size", "" + datasizepercent + "%");
+
+    var thistime = Date.now();
+    var thisframefps = 1000 / (thistime - prevtime);
+    averagefps += (thisframefps - averagefps) / fpsrange;
+    prevtime = thistime;
+    var framespersecond = Math.floor(averagefps * 10) / 10;
+    consoleitemvalue("Frames/Second", "" + framespersecond + "");
+
 //    var msg = 'result is ' + datasizepercent + '% of the input size';
 //    console.log(msg);
 //    cstatus.innerHTML += '<br />' + msg;
 
     var outwidth  = comvas.width;
     var outheight = comvas.height;
-    var videowidth = outwidth / 2;
-    var videoheight = outheight / 2;
-    var videotopmargin = videoheight / 2;
-    var videoleftmargin = videowidth / 2;;
+    var videowidth  = inwidth  - 30; // outwidth / 2;
+    var videoheight = inheight - 30; // outheight / 2;
+    var videotopmargin  = 15; // videoheight / 2;
+    var videoleftmargin = 15; // videowidth / 2;;
     var datacode = codetoimage(imagecode, outwidth, outheight);
 //    var datacodeimage = new ImageData(datacode, comvaswidth, comvasheight);
 
@@ -162,7 +169,7 @@ var rebuild = decompresscode(imagecode);
 ////console.log(rebuild);
 ////var rebuilt = new ImageData(rebuild, cwidth, cheight);
 //comtext.drawImage(rebuild, 10, 10, cwidth, cheight);
-comvas2d.putImageData(rebuild, videoleftmargin, videotopmargin);
+comvas2d.putImageData(rebuild, videoleftmargin, videotopmargin, 0, 0, videowidth, videoheight);
 
 
 //return; // stop frame loop
@@ -213,12 +220,12 @@ async function camerabuttonclick() {
   } else {
     cwidth = cheight = 0; // reset any nocamera sizing
 //  try {
-console.log('AWAIT IS NOT YET ON');
+//console.log('AWAIT IS NOT YET ON');
 
    try {
     const stream = await media.getUserMedia({ video: true }); // , audio: true });
-
-console.log('AWAIT IS ON');
+// TODO: enumerate devices
+//console.log('AWAIT IS ON');
 
     cstatus.innerHTML = 'waiting for stream...';
     while (!stream) {
@@ -307,20 +314,12 @@ function codehex(buffer) {
 
 var codetoimagebuffer = null;
 
-
 function codetoimage(buffer, width, height) {
   var imagelen = width * height;
   var imagebytelen = imagelen * 4;
 //  var bytewidth = width * 4;
-  var image = codetoimagebuffer;
-  if (!codetoimagebuffer) {
-    image = new Uint8ClampedArray(imagebytelen);
-    codetoimagebuffer = image;
-  } else if (image.length != imagebytelen) {
-    delete codetoimagebuffer;
-    image = new Uint8ClampedArray(imagebytelen);
-    codetoimagebuffer = image;
-  } // first instance = new, new size = reset
+  var image = rebuffer8(codetoimagebuffer, imagebytelen);
+  codetoimagebuffer = image;
   var lineheight = Math.floor(imagelen / buffer.length);
   if (lineheight < 1) {
     console.log('0 lineheight implies more buffer than image');

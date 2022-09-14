@@ -17,13 +17,22 @@ function hexsection(buffer, index, before, after) {
 }
 
 // -- DEFAULT PALETTE -------------------------------------------------------
+//function emptypalette() {
+// only count up to palettemaxindex ? or to palettelength ?
+//  greys should migrate like all others so, palettelength ....
+//  but actually palettenumitems .. meaning no grey counting ...
+//  meaning no grey retain ..... grey in rgba is silly anyway
+//  meaning new palette has grey as preset to be same as receiver ...
+
 function defaultpalette(greyalpha) {
   var palettelength   = (255 << 8) + 255 + 1; // length is FFFF+1(65536)
   var palettergbalen  = palettelength * 4;    // palette stores rgba
-  var paletteitems    = new Uint8ClampedArray(palettergbalen);
+  var paletteitems      = new Uint8ClampedArray(palettergbalen);
+  var paletteitemcounts = new Uint16Array(palettelength);
   var palettenumitems = 1; // 00 0000 (0, 0) is the prefix for paletteaddress mode
   paletteitems[0] = paletteitems[1] = paletteitems[3] = 0xFF; // unaddressable yellow
   var palettemaxindex = 0xFEFF; // FF00-FFFF are reserved for n,n,n,a 0-255 defaultalpha
+//  var palette = emptypalette();
   var black = 0xFF00, white = 0xFFFF;
   var greyindex = black;
   while (greyindex <= white) {
@@ -34,9 +43,90 @@ function defaultpalette(greyalpha) {
     paletteitems[thgix + 3] = greyalpha;
     greyindex++; // note these are not added to the palettenumitems counter !
   } // pre-add greys as top of two-byte range (grey/rgb, ababab -> 00FFab; rgba, abababFF -> 00FFab)
-  return { items: paletteitems, numitems: palettenumitems, length: palettelength,
-           maxindex: palettemaxindex, rgbalen: palettergbalen, black: black, white: white };
+  return { items: paletteitems, numitems: palettenumitems, maxindex: palettemaxindex,
+           length: palettelength, itemcounts: paletteitemcounts, rgbalen: palettergbalen,
+           black: black, white: white, greyalpha: greyalpha };
 }
+
+function indexofmax(histogram, numitems) {
+  if (numitems < 1) { return -1; }
+  var maxvalue = histogram[0];
+  var maxindex = 0;
+  var ix = -1;
+  while (++ix < numitems) {
+    if (histogram[ix] > maxvalue) {
+      maxindex = ix;
+      maxvalue = histogram[ix];
+    }
+  }
+  return maxindex;
+}
+
+
+function retainpalette(prevpalette, nextimage) {
+  // go through previous palette in descending histogram count order
+  // any detected colours go into the new palette !
+  // delete previous palette memory once finished !
+    // greys are always 1 + two-byte index! ??
+    // maybe not ... first palette can.. subsequent just retain and also reorder ...
+    // grey will gravitate toward single index in one pass (if greyalpha matches)
+  // nextimage length should be same as previmage but doesn't have to be
+  var nextpalette = defaultpalette(prevpalette.greyalpha);
+  var retainarray = new Uint16Array(prevpalette.length);
+  var retaincount = 0;
+  var histogram = prevpalette.itemcounts;
+  var hix = indexofmax(histogram, prevpalette.numitems);
+  while (prevpalette.itemcounts[hix] != 0) { // zero saved values
+    var prevpaletteix = hix * 4;
+    var pix = 0;
+    while (pix < nextimage.length) {
+      if (   prevpalette.items[prevpaletteix + 0] == nextimage[pix + 0]
+          && prevpalette.items[prevpaletteix + 1] == nextimage[pix + 1]
+          && prevpalette.items[prevpaletteix + 2] == nextimage[pix + 2]
+          && prevpalette.items[prevpaletteix + 3] == nextimage[pix + 3]) {
+        break; // colour found ! stop searching!
+      }
+      pix += 4;
+    } // >= rgbalen if not found !
+    if (pix < prevpalette.rgbalen) {
+      // store the retain index for passing to receiver
+      retainarray[retaincount] = hix;
+      retaincount++;
+      var nextpaletteix = nextpalette.numitems * 4;
+      nextpalette.items[nextpaletteix + 0] = prevpalette.items[prevpaletteix + 0];
+      nextpalette.items[nextpaletteix + 1] = prevpalette.items[prevpaletteix + 1];
+      nextpalette.items[nextpaletteix + 2] = prevpalette.items[prevpaletteix + 2];
+      nextpalette.items[nextpaletteix + 3] = prevpalette.items[prevpaletteix + 3];
+      nextpalette.numitems++;
+      prevpalette.itemcounts[hix] = 0; // don't count twice
+    } else { // still reset count if colour not found
+      prevpalette.itemcounts[hix] = 0; // would set -1 but it's Uint!
+    }
+    hix = indexofmax(prevpalette.itemcounts, prevpalette.numitems);
+  }
+  return { nextpalette: nextpalette, retainarray: retainarray, retaincount: retaincount };
+}
+/////////////////////////////////////////////////////////////////////
+
+
+// compressbitmap, get palette out ... remember remap deets for faster rebuild ?
+
+//function rebuildbitmap(thisbitmap
+
+// first frame creates defaultpalette
+// items filled and counted
+//   firstpaletteout is histogram reordered
+//    that means image needs to be rebuilt ! should be smaller due to small index hits !
+
+// next frame creates nextpalette
+// nextpalette and
+
+
+
+/////////////////////////////////////////////////////////////////////
+
+
+
 
 // 55555555
 //  55555
@@ -377,10 +467,18 @@ function backgroundcolour(imagedata, colourreductionbits, alphareductionbits) {
 
 var repeats   = null; // []; to make debug sequence
 var repeatsin = null; // []; to make debug sequence
-function compressbitmap(imagedata, mode) { // 0 for grey, 1 for rgb, 2 for rgba
+//function compressbitmap(imagedata, mode) { // 0 for grey, 1 for rgb, 2 for rgba
+// compressbitmap now returns palette data
+
+var imagecodebuffer = null;
+var modeswitchbuffer = null;
+var prevpalette = null;
+function buildbitmap(imagedata, mode) { // 0 for grey, 1 for rgb, 2 for rgba
   // -- DEFAULT OPACITY -------------------------------------------------------
-  var headerlen = 11;
-  var defaultalpha = 250; // default to 250 opacity
+  var headerlen = 13;
+  var defaultalpha = 250; // default to near full opacity (note!)
+  var marginalpha  = 127; // expect margin of 1px or set to defaultalpha!
+//  var defaultalpha = 127; // default to half opacity (note!)
   var sendcolour = (mode > 0) ? false : true ; // true for rgb, false for grey
   var sendalpha  = (mode > 1) ? true  : false; // true for rgba, false for rgb
   // false sendcolour and true sendalpha will break things
@@ -393,7 +491,10 @@ function compressbitmap(imagedata, mode) { // 0 for grey, 1 for rgb, 2 for rgba
   var inputdata    = imagedata.data;
   var outputlen    = inputrgbalen; // max compression = 0%
   var outputspan   = (sendcolour) ? 3 : 1;
-  var imagecode = new Uint8ClampedArray(outputlen);
+
+  var imagecode = rebuffer8(imagecodebuffer, outputlen);
+  imagecodebuffer = imagecode;
+
   imagecode[0] = (sendcolour) ? 255 : 255;  // always use red FF to avoid index gap
   imagecode[1] = (sendalpha) ? 0xEE : (sendcolour) ? 0xFF : 0; // to differentiate!
   imagecode[2] = (sendcolour) ? 255 :   0;  // 0,0 for grey! 255,255 for rgb !
@@ -404,23 +505,57 @@ function compressbitmap(imagedata, mode) { // 0 for grey, 1 for rgb, 2 for rgba
   imagecode[7] = Math.trunc(inputheight / 256); // might be 0
   imagecode[8] = inputheight % 256;
   imagecode[9] = defaultalpha;                  // 250 / 255!
+
+
+  var retain = null;
+  var retainlength = 0;
+  var palette = null;
+  if (prevpalette) {
+    var rp = retainpalette(prevpalette, imagedata);
+    retain = rp.retainarray;
+    retainlength = rp.retaincount;
+    palette = rp.nextpalette;
+  } else { palette = defaultpalette(defaultalpha); } // (FF00-FFFF = grey, alpha%)
+  prevpalette = palette;
+  imagecode[10] = retainlength >> 8;
+  imagecode[11] = retainlength % 256;
   imagecode[headerlen - 1] = 0;                 // alignment 0
   // unspecified: colourreduction, dithering
-  var startofimagelen = headerlen;
+  var startofimagelen = headerlen; // + (retainlength * 2);
   var endofimagelen = (mode == 0) ? 2 : 4; // grey has FF trigger, rgb has FFFFFF
-  outputlen += startofimagelen + endofimagelen; // max output = inputsize + headers
+//  outputlen += startofimagelen + endofimagelen; // max output = inputsize + headers
+// ^ false ... outputlen is the defined size equals input image len
+  var outputix = startofimagelen;
+  var outputmax = outputlen - endofimagelen;
+  var retix = -1;
+  while (++retix < retainlength) {
+    imagecode[outputix++] = retain[retix] >> 8;
+    imagecode[outputix++] = retain[retix] % 256;
+  }
   // -- MODE SWITCHES ---------------------------------------------------------
   var modenumswitches = 254; // there is no mode FF, because FF is toggle redbyte
-  var modeenabled = new Uint8ClampedArray(modenumswitches + 1); // include mode 0
-  var palette = defaultpalette(defaultalpha); // (FF00-FFFF = grey, alpha%)
+  var modeenabled = rebuffer8(modeswitchbuffer, modenumswitches + 1);
+  modeswitchbuffer = modeenabled; // this means mode state carries between frames !
+                                  // that means receiver needs to receive every frame!
+                                  // otherwise it can fall out of sync !
+//  var modeenabled = new Uint8ClampedArray(modenumswitches + 1); // include mode 0
+  // small realloc every frame for values to be reset !
+
+// palette is now reused memory how can that be !
+// two palettes need to be stored in order to determine the differential !
+// differential palette used for subsequent frames !
+//  contains all reordered colours from first frame -- first frame sent unordered
+//   so instead of resending colours, send retain commands ? second frame will be scattered
+//   but third frame will be relatively clean
+//   retain commands will be in histogram order !
+
+
   var unpalettedpixels = 0;
   var palettemode = 0;
   var repeatcount = 0;
 //  var lastpaletteindex = 0; // palette mode is on after SOI, so, refer to colour 0
   var lastpaletteindex = -1; // no, it is off until it is on!
   // grey, rgb and rgba all match colours in all four channels !
-  var outputix = startofimagelen;
-  var outputmax = outputlen - endofimagelen;
   var inputix = 0; // align with top-left pixel
   // -- DETOUR: PRE-ANALYSE IMAGE ---------------------------------------------
   var background = { red: 0, green: 0, blue: 0, alpha: 0 };
@@ -613,6 +748,7 @@ function compressbitmap(imagedata, mode) { // 0 for grey, 1 for rgb, 2 for rgba
 //console.log('1-byte match at ' + paletteindex + ', outputix is ' + outputix);
             imagecode[outputix++] = paletteindex; // palix should be the same!
           }
+          palette.itemcounts[paletteindex]++; // sending index increments count
           lastpaletteindex = paletteindex; // remember this pixel's palette colour for pixelmatch
           writepixel = 0;    // the pixel has been written as an index of the palette
           break;             // stop searching the palette
@@ -699,7 +835,9 @@ function compressbitmap(imagedata, mode) { // 0 for grey, 1 for rgb, 2 for rgba
         palette.items[thpix + 1] = inputdata[inputix + 1]; // remember colours in grey mode
         palette.items[thpix + 2] = inputdata[inputix + 2];
         if (sendalpha || reasontosendalpha) { // if alpha was sent in code (for some reason)
-          palette.items[thpix + 3] = inputdata[inputix + 3]; // remember it (always if rgba)
+          if (inputix == 0) { // top left pixel sets border alpha !
+            paletteitems[thpix + 3] = marginalpha;
+          } else { palette.items[thpix + 3] = inputdata[inputix + 3]; } // remember it (always if rgba)
         } else { palette.items[thpix + 3] = defaultalpha; }  // or use default (ignore input alpha)
         palette.numitems++; // palette now has 1 more item
         if (paletteindex == 0) { console.log('not possible - paletteindex 0 unaddressable');     }
@@ -718,6 +856,7 @@ function compressbitmap(imagedata, mode) { // 0 for grey, 1 for rgb, 2 for rgba
 //console.log('1-byte add at ' + paletteindex + ', outputix is ' + outputix);
 //repeats.push(paletteindex);
         } // FF cannot be sent as 1-byte because of red FF trigger match!
+        palette.itemcounts[paletteindex] = 1; // sending index increments count (was 0)
         lastpaletteindex = paletteindex; // remember this pixel's palette colour for pixelmatch
         writepixel = 0;    // the pixel has been written as an index of the palette
       } // either colour was added, or palettemode was disabled because the palette is full
@@ -789,8 +928,16 @@ function compressbitmap(imagedata, mode) { // 0 for grey, 1 for rgb, 2 for rgba
 //  console.log('palettenumitems:  ' + palette.numitems);
 //  console.log('unpalettedpixels: ' + unpalettedpixels);
 //  console.log('++++++++++++++++++++++++++ END OF ENCODE');
-  return truncedimagecode;
+  return { imagecode: truncedimagecode, palette: palette };
 }
+
+function compressbitmap(imagedata, mode) { // 0 for grey, 1 for rgb, 2 for rgba
+  var compressed = buildbitmap(imagedata, mode);
+//  console.log('palette items: ' + compressed.palette.numitems);
+  // TODO: .................?
+  return compressed.imagecode;
+}
+
 
 // ----------------------------------------------------------------------------------------------------
 // ----------------------------------------------------------------------------------------------------
@@ -800,8 +947,10 @@ function compressbitmap(imagedata, mode) { // 0 for grey, 1 for rgb, 2 for rgba
 // ====================================================================================================
 // ====================================================================================================
 
+var prevdepalette = null;
+
 function decompresscode(imagecode) {
-  var headerlen = 11;
+  var headerlen = 13;
   var codelength = imagecode.length;
   if      (codelength <  14) { console.log('not code!') ;     return undefined; }
   else if (codelength == 14) { console.log('no code!')  ;     return undefined; }
@@ -816,6 +965,7 @@ function decompresscode(imagecode) {
   var imagewidth  = imagecode[5] * 256 + imagecode[6];
   var imageheight = imagecode[7] * 256 + imagecode[8];
   var defaultalpha = imagecode[9];
+  var retaincount = imagecode[10] * 256 + imagecode[11];
   if (imagecode[headerlen - 1] != 0) { console.log('expect 0 ending SOI'); return null; }
   var imagergbalen = imagewidth * imageheight * 4;
   var imageout = new Uint8ClampedArray(imagergbalen);
@@ -823,7 +973,45 @@ function decompresscode(imagecode) {
   var modenumswitches = 254; // there is no mode FF, because FF is toggle redbyte
   var modeenabled = new Uint8ClampedArray(modenumswitches + 1); // include mode 0
 //  var palette = defaultpalette(); // greys are at 00 FF(00-FF)! colour 0 is unaddressable!
-  var palette = defaultpalette(defaultalpha); // greys are at 00 FF(00-FF)! colour 0 is unaddressable!
+  var codeix = headerlen - 1; // after SOI frame (10 bytes!), -1 because pre-increment
+  var palette = null;
+  if (retaincount > 0 && !prevdepalette) {
+    console.log('palette retains but no prev depalette');
+    return null; // fail !
+  } else if (prevdepalette) {
+    palette = defaultpalette(defaultalpha); // need a fresh palette to fill
+    if (!retaincount) {
+      console.log('this is a fresh frame for some reason');
+    } else { // read retains !
+      var rix = 0;
+      while (++rix <= retaincount) {
+        var indexhigh = imagecode[++codeix];
+        var indexlow  = imagecode[++codeix];
+        var retainindex = (indexhigh * 256) + indexlow;
+        var retaingrey = (   retainindex >= prevdepalette.black
+                          && retainindex <= prevdepalette.white);
+        if (retainindex >= prevdepalette.numitems && !retaingrey) {
+          console.log('tried to retain palette nonindex');
+          return null; // fail
+        }
+        var retpalix = retainindex * 4;
+        var newpalix = palette.numitems * 4;
+        palette.items[newpalix + 0] = prevdepalette.items[retpalix + 0];
+        palette.items[newpalix + 1] = prevdepalette.items[retpalix + 1];
+        palette.items[newpalix + 2] = prevdepalette.items[retpalix + 2];
+        palette.items[newpalix + 3] = prevdepalette.items[retpalix + 3];
+        palette.numitems++;
+      }
+    }
+    delete prevdepalette.items;
+    delete prevdepalette.itemcounts;
+    var retainpercent = Math.floor(retaincount / prevdepalette.numitems * 100);
+    consoleitemvalue("Palette Retained", "" + retainpercent + "%");
+  } else {
+    palette = defaultpalette(defaultalpha); // greys are at 00 FF(00-FF)! colour 0 is unaddressable!
+  }
+  prevdepalette = palette;
+
   var unpalettedpixels = 0;       // palettemode might not switch back on! todo - check
   var palettemode = 0;            // toggle triggered by FFFFFF[FF] in rgb/rgba, FF[FF] in grey
   var repeatcount = 0;            // repeat triggered by FF/FFFFFF[0-253,254] if palettemode on
@@ -833,7 +1021,7 @@ function decompresscode(imagecode) {
   var paletteindex = -1;      // no paletteindex to begin with
   var thispixel = new Uint8ClampedArray(4); // thispixel is local-only but constructed once
   var outputix = 0;           // start from top-left of output image array
-  var codeix = headerlen - 1; // after SOI frame (10 bytes!), -1 because pre-increment
+
   while (codeix < codelength) { // read code (++codeix for every incrememt)
     // -- TOGGLE HANDLING UPFRONT --------------------------------------------------------
     // cannot clear thatwasatoggletoggle because it is used by redbyte

@@ -1,6 +1,28 @@
-var colourreductionbits = 3;
+var colourreductionbits = 4;
 
 function id(id) { return document.getElementById(id); }
+
+function rebuffer8(buffer, length) {
+  var renew = buffer;
+  if (!renew) {
+    renew = new Uint8ClampedArray(length);
+  } else if (renew.length != length) {
+    delete buffer;
+    renew = new Uint8ClampedArray(length);
+  } // first instance = new, new size = reset
+  return renew;
+} // used by rle and cam
+
+function rebuffer16(buffer, length) {
+  var renew = buffer;
+  if (!renew) {
+    renew = new Uint16Array(length); // no clamp
+  } else if (renew.length != length) {
+    delete buffer;
+    renew = new Uint16Array(length); // no clamp
+  } // first instance = new, new size = reset
+  return renew;
+} // used by rle and cam
 
 function consoleitem(name) {
   var console = id('console');
