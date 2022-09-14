@@ -1,0 +1,6 @@
+- enumerate devices for multiple streams
+- find microphone streams
+- encode audio into frames
+- send frames to brady bunch grid server
+- incorporate vector text and graphics
+- contemplate secure stream algorithms
